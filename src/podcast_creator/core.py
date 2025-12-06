@@ -15,6 +15,7 @@ THINK_PATTERN = re.compile(r"<think>(.*?)</think>", re.DOTALL)
 def parse_thinking_content(content: str) -> Tuple[str, str]:
     """
     Parse message content to extract thinking content from <think> tags.
+    Handles complete pairs, standalone opening tags, and standalone closing tags.
 
     Args:
         content (str): The original message content
@@ -40,17 +41,30 @@ def parse_thinking_content(content: str) -> Tuple[str, str]:
     if len(content) > 100000:
         return "", content
 
-    # Find all thinking blocks
-    thinking_matches = THINK_PATTERN.findall(content)
+    # Start with original content
+    cleaned_content = content
+    thinking_parts = []
 
-    if not thinking_matches:
-        return "", content
+    # First, remove complete pairs and extract their content
+    thinking_matches = THINK_PATTERN.findall(content)
+    if thinking_matches:
+        thinking_parts.extend(match.strip() for match in thinking_matches)
+        cleaned_content = THINK_PATTERN.sub("", cleaned_content)
+
+    # Handle standalone closing tag (e.g., "</think>\n{...}")
+    # This often happens when LLM puts everything in thinking but only closes it
+    # Remove standalone closing tag at the beginning of content
+    cleaned_content = re.sub(r"^\s*</think>\s*", "", cleaned_content, flags=re.MULTILINE)
+    # Also remove any standalone closing tags elsewhere
+    cleaned_content = re.sub(r"</think>\s*", "", cleaned_content, flags=re.MULTILINE)
+
+    # Handle standalone opening tag (less common but possible)
+    # Remove standalone opening tag if there's no matching closing tag
+    if "<think>" in cleaned_content and "</think>" not in cleaned_content:
+        cleaned_content = re.sub(r"<think>\s*", "", cleaned_content, flags=re.MULTILINE)
 
     # Join all thinking content with double newlines
-    thinking_content = "\n\n".join(match.strip() for match in thinking_matches)
-
-    # Remove all <think>...</think> blocks from the original content
-    cleaned_content = THINK_PATTERN.sub("", content)
+    thinking_content = "\n\n".join(thinking_parts) if thinking_parts else ""
 
     # Clean up extra whitespace
     cleaned_content = re.sub(r"\n\s*\n\s*\n", "\n\n", cleaned_content).strip()
@@ -58,26 +72,107 @@ def parse_thinking_content(content: str) -> Tuple[str, str]:
     return thinking_content, cleaned_content
 
 
+def extract_json_from_text(text: str) -> str:
+    """
+    Extract JSON from text that may contain explanatory text before/after the JSON.
+    
+    Handles:
+    1. JSON in markdown code blocks: ```json {...} ```
+    2. Plain JSON object: {...}
+    3. Text before/after JSON
+    
+    Args:
+        text (str): Text that may contain JSON
+        
+    Returns:
+        str: Extracted JSON string, or original text if no JSON found
+        
+    Example:
+        >>> text = "Here's the result:\n```json\n{\"key\": \"value\"}\n```"
+        >>> extract_json_from_text(text)
+        '{"key": "value"}'
+    """
+    if not isinstance(text, str):
+        return str(text) if text is not None else ""
+    
+    # Try to extract JSON from markdown code blocks first
+    # Match ```json or ``` followed by JSON object
+    json_code_block_pattern = re.compile(r"```(?:json)?\s*(\{.*?\})\s*```", re.DOTALL)
+    match = json_code_block_pattern.search(text)
+    if match:
+        return match.group(1).strip()
+    
+    # Try to find JSON object by finding first { and matching closing }
+    # This handles cases where JSON is not in code blocks
+    brace_start = text.find("{")
+    if brace_start == -1:
+        # No JSON found, return original text
+        return text
+    
+    # Find matching closing brace by counting braces
+    # This properly handles nested objects and arrays
+    brace_count = 0
+    in_string = False
+    escape_next = False
+    brace_end = -1
+    
+    for i in range(brace_start, len(text)):
+        char = text[i]
+        
+        if escape_next:
+            escape_next = False
+            continue
+        
+        if char == "\\":
+            escape_next = True
+            continue
+        
+        if char == '"' and not escape_next:
+            in_string = not in_string
+            continue
+        
+        if in_string:
+            continue
+        
+        if char == "{":
+            brace_count += 1
+        elif char == "}":
+            brace_count -= 1
+            if brace_count == 0:
+                brace_end = i
+                break
+    
+    if brace_end != -1:
+        json_str = text[brace_start:brace_end + 1]
+        return json_str.strip()
+    
+    # If no valid JSON found, return original text
+    return text
+
+
 def clean_thinking_content(content: str) -> str:
     """
-    Remove thinking content from AI responses, returning only the cleaned content.
-
-    This is a convenience function for cases where you only need the cleaned
-    content and don't need access to the thinking process.
-
+    Remove thinking content from AI responses and extract JSON if present.
+    
+    This function:
+    1. Removes <think> tags
+    2. Extracts JSON from the cleaned content (handles text before/after JSON)
+    
     Args:
         content (str): The original message content with potential <think> tags
 
     Returns:
-        str: Content with <think> blocks removed and whitespace cleaned
+        str: Cleaned content with thinking tags removed and JSON extracted
 
     Example:
-        >>> content = "<think>Let me think...</think>Here's the answer"
+        >>> content = "<think>Let me think...</think>Here's the result: {\"key\": \"value\"}"
         >>> clean_thinking_content(content)
-        "Here's the answer"
+        '{"key": "value"}'
     """
     _, cleaned_content = parse_thinking_content(content)
-    return cleaned_content
+    # Extract JSON if present (handles cases where LLM adds explanatory text)
+    json_content = extract_json_from_text(cleaned_content)
+    return json_content
 
 
 class Segment(BaseModel):
