@@ -45,3 +45,6 @@ packages = ["src/podcast_creator"]
 
 [project.scripts]
 podcast-creator = "podcast_creator.cli:cli"
+
+[tool.uv.sources]
+esperanto = { path = "lib/esperanto-2.10.0-py3-none-any.whl" }
